@@ -1,5 +1,5 @@
 '''
-Implementing Primal Wasserstein Imitation Learning
+Primal Wasserstein Imitation Learning (Dadashi et al. 2020)
 '''
 
 import numpy as np
@@ -70,6 +70,12 @@ class Agent:
         dones = np.array(self.dones)[batch_indices]
         return states,actions,rewards,new_states,dones
 
+    def save_model(self) :
+        self.Q_function.save_weights('results/DQN_PWIL_CartPole_Q')
+
+    def load_model(self) :
+        self.Q_function.load_weights('results/DQN_PWIL_CartPole_Q')
+
     def learn(self):
         if len(self.states) < self.batch_size :
             return
@@ -137,7 +143,7 @@ def train_expert(env,agent) :
             print(f'Time taken to train with RL : {time.process_time()-st}')
             break
 
-def test_agent(env, agent, n_episodes, verbose=1) :
+def test_agent(env, agent, n_episodes, verbose=1, render=False) :
     average_score = 0
     for episode in range(n_episodes) :
         done = False
@@ -146,6 +152,8 @@ def test_agent(env, agent, n_episodes, verbose=1) :
         step=0
         while not done :
             action = agent.select_action(state, greedy=True)
+            if render :
+                env.render()
             new_state,reward,done,info = env.step(action)
             score += reward
             state = new_state
@@ -159,8 +167,76 @@ def test_agent(env, agent, n_episodes, verbose=1) :
         print(f'    Average evaluation score : {total_avg}')
     return total_avg
 
+def train_pwil(env, agent) :
+
+    n_episodes = 10000
+    average_score = 10
+    horizon = 500
+    alpha = 0.001
+    beta = 1
+    sigma = alpha * horizon / np.sqrt(env.action_space.n + env.observation_space.shape[0])
+    st = time.process_time()
+
+    for episode in range(n_episodes) :
+        done = False
+        state = env.reset()
+        score = 0
+        chosen_demo = np.random.choice(num_demos)
+        chosen_demo_actions = demo_actions[chosen_demo]
+        chosen_demo_states = demo_states[chosen_demo]
+        D = len(chosen_demo_actions)
+        weights = [1/D for i in range(D)]     # 1/Total number of expert state-action pairs (1/D in the paper)
+
+        while not done :                                            # handling horizon T ?
+            action = agent.select_action(state)      
+            if render :
+                env.render()               
+            new_state, reward, done, prob = env.step(action)        
+            score += reward
+            
+            # The weights should sum to 1 - note that it isnt the case due to variable episode length
+            weight_pi = 1/horizon
+            cost = 0
+            # while there is still dirt
+            while weight_pi > 0 :
+                # Finding the greedy coupling (the closest hole)
+                diff = np.sum(np.abs(chosen_demo_states[:,0] - state[0])+np.abs(chosen_demo_states[:,2] - state[2]))
+                closest = np.argmin(diff)
+
+                # If there is more 'dirt mass' (weight_pi) than space in the hole (expert weight)
+                if weight_pi >= weights[closest] :
+                    cost += weights[closest] * np.sum(np.abs(chosen_demo_states[:,0] - state[0])+np.abs(chosen_demo_states[:,2] - state[2]))
+                    weight_pi -= weights[closest]
+
+                    chosen_demo_states = np.delete(chosen_demo_states,closest,0)
+                    chosen_demo_actions = np.delete(chosen_demo_actions,closest)
+                    weights = np.delete(weights,closest)
+                else :
+                    cost += weight_pi * np.sum(np.abs(chosen_demo_states[:,0] - state[0])+np.abs(chosen_demo_states[:,2] - state[2]))
+                    weights[closest] -= weight_pi
+                    weight_pi = 0
+
+            reward = beta * np.exp(-sigma*cost)
+            
+            agent.store_experience(state,action,reward,new_state,done)
+            agent.learn()
+            state = new_state
+
+        average_score = 0.90*average_score + 0.10*score
+        print(f'    Episode {episode} score {score}      average score {round(average_score)}')
+        if episode%10 == 0 and test_agent(env,agent,5,verbose=0) >= 450 :
+            save = input('Save model ? (y/n)')
+            if save == 'y' :
+                agent.save_model()
+            print(f'Time taken to train with PWIL : {time.process_time()-st}')
+            break
+
+    return agent
+
+
+
 env = gym.make('CartPole-v1')
-agent = Agent(env)
+pwil_agent = Agent(env)
 
 print(f"    -   -   -   Testing Primal Wasserstein Imitation Learning on CartPole-v1    -   -   -\n")
 
@@ -184,65 +260,18 @@ except FileNotFoundError :
         demo_states.append(np.loadtxt(f'policies/CartPole_expert_states_{i}'))
         demo_actions.append(np.loadtxt(f'policies/CartPole_expert_actions_{i}'))
 
-# The algorithm
+render = input('Render ? (y/n)')
+if render == 'y' :
+    render = True
+else :
+    render = False
 
-n_episodes = 10000
-average_score = 10
-horizon = 500
-alpha = 0.001
-beta = 1
-sigma = alpha * horizon / np.sqrt(env.action_space.n + env.observation_space.shape[0])
-st = time.process_time()
-print('Training agent with PWIL...')
-for episode in range(n_episodes) :
-    done = False
-    state = env.reset()
-    score = 0
-    chosen_demo = np.random.choice(num_demos)
-    chosen_demo_actions = demo_actions[chosen_demo]
-    chosen_demo_states = demo_states[chosen_demo]
-    D = len(chosen_demo_actions)
-    weights = [1/D for i in range(D)]     # 1/Total number of expert state-action pairs (1/D in the paper)
-
-    while not done :                                            # handling horizon T ?
-        action = agent.select_action(state)                     
-        new_state, reward, done, prob = env.step(action)        
-        score += reward
-        
-        # The weights should sum to 1 - note that it isnt the case due to variable episode length
-        weight_pi = 1/horizon
-        cost = 0
-        # while there is still dirt
-        while weight_pi > 0 :
-            # Finding the greedy coupling (the closest hole)
-            diff = np.sum(np.abs(chosen_demo_states[:,0] - state[0])+np.abs(chosen_demo_states[:,2] - state[2]))
-            closest = np.argmin(diff)
-
-            # If there is more 'dirt mass' (weight_pi) than space in the hole (expert weight)
-            if weight_pi >= weights[closest] :
-                cost += weights[closest] * np.sum(np.abs(chosen_demo_states[:,0] - state[0])+np.abs(chosen_demo_states[:,2] - state[2]))
-                weight_pi -= weights[closest]
-
-                chosen_demo_states = np.delete(chosen_demo_states,closest,0)
-                chosen_demo_actions = np.delete(chosen_demo_actions,closest)
-                weights = np.delete(weights,closest)
-            else :
-                cost += weight_pi * np.sum(np.abs(chosen_demo_states[:,0] - state[0])+np.abs(chosen_demo_states[:,2] - state[2]))
-                weights[closest] -= weight_pi
-                weight_pi = 0
-
-        reward = beta * np.exp(-sigma*cost)
-        
-        agent.store_experience(state,action,reward,new_state,done)
-        agent.learn()
-        state = new_state
-
-    average_score = 0.90*average_score + 0.10*score
-    print(f'    Episode {episode} score {score}      average score {round(average_score)}')
-    if episode%10 == 0 and test_agent(env,agent,5,verbose=0) >= 450 :
-        print(f'Time taken to train with PWIL : {time.process_time()-st}')
-        break
-
-
-print(f'Training complete, testing the agent')
-test_agent(env,agent,10,verbose = 2)
+train = int(input('train (0) or test ? (1)'))
+if train == 0 :
+    print('Training agent with PWIL...')
+    pwil_agent = train_pwil(env, pwil_agent)
+    print(f'Training complete, testing the agent')
+    test_agent(env,pwil_agent,10,verbose = 2)
+else :
+    pwil_agent.load_model()
+    test_agent(env,pwil_agent,10,render=True)

@@ -1,5 +1,7 @@
 '''
-Trying out the JSRL method to accelerate RL on MountainCar-v0
+Trying out the JSRL method to accelerate a DQN agent on CartPole-v1
+It is not needed (the problem is already simple), but it works
+from Uchendu et al. 2022
 '''
 
 from collections import deque
@@ -7,50 +9,9 @@ import numpy as np
 import tensorflow as tf
 import os
 import gym
-from TD_Tiles import TD_Tiles, epsilon_greedy_action
-from tilecoding import TileCoding
-
+import behavioral_cloning
+from stable_baselines3 import PPO
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-def generate_expert_trajectories(w,n_trajs) :
-    n_trajs = 100
-    print(f'Generating {n_trajs} expert trajectories')
-
-    env = gym.make('MountainCar-v0')
-    trajs = []
-    n_episodes = 10
-    for episode in range(n_episodes) :
-        done = False
-        state = env.reset()
-        score = 0
-        traj=[]
-        while not done :
-            action = epsilon_greedy_action(w, T.encode_state(state), 0)
-            new_state,reward,done,info = env.step(action)
-            traj.append([state, action, reward, new_state])
-            score += reward
-            state = new_state
-        trajs.append(traj)
-        print(f'    Episode {episode} score {score}')
-    return trajs
-
-def expert_action(expert,state) :
-    T = TileCoding(8,8,8,[-1.2, 0.6],[-0.07,0.07])
-    x = T.encode_state(state)
-    action = epsilon_greedy_action(expert,x,0)
-    return action
-
-def load_expert() :
-    env = gym.make('MountainCar-v0')
-    try :
-        expert = np.loadtxt('policies/Tiles_w')
-        print('     Found existing expert')
-    except FileNotFoundError :
-        T = TileCoding(8,8,8,[-1.2, 0.6],[-0.07,0.07])
-        print(' No existing expert found, training one')
-        expert = TD_Tiles(T,'qlearning')
-        np.savetxt('policies/Tiles_w', w)
-    return expert
 
 def test_agent(env, agent, n_episodes, expert=None, guide_steps=0, verbose=1) :
     average_score = 0
@@ -61,13 +22,13 @@ def test_agent(env, agent, n_episodes, expert=None, guide_steps=0, verbose=1) :
         step=0
         while not done :
             if step < guide_steps :
-                action = expert_action(expert, state)
+                action, _ = expert.predict(state)
             else :
                 action = agent.select_action(state, greedy=True)
             new_state,reward,done,info = env.step(action)
             score += reward
             state = new_state
-            step += 1
+            step+=1
 
         average_score += score
         #print(f'Episode {episode} score {score}')
@@ -75,63 +36,6 @@ def test_agent(env, agent, n_episodes, expert=None, guide_steps=0, verbose=1) :
     if verbose :
         print(f'    Average evaluation score : {total_avg}')
     return total_avg
-
-def train_agent(env,agent,n_episodes,jsrl=False, store_guide_data=True) :
-    if jsrl :
-        print('Preparing the expert')
-        expert = load_expert()
-        expert_score = test_agent(env,None,100,expert,200)
-        print(f'\n Training DQN agent with JSRL for max. {n_episodes} episodes...\n')
-        h = 200
-
-    else :
-        print(f'\n Training DQN agent without JSRL for max. {n_episodes} episodes...\n')
-        expert = None
-        h = 0
-
-    total_env_steps = 0 # counts the number of steps we have to train
-    total_learning_steps = 0
-    h_decrease = 5
-    for episode in range(n_episodes) :
-        done = False
-        state = env.reset()
-        score = 0
-        step = 0
-        guide = 0
-        exploration = 0
-        while not done :
-            if step < h :
-                action = expert_action(expert,state)
-                guide += 1
-                new_state,reward,done,info = env.step(action)
-                if store_guide_data :
-                    agent.store_experience(state,action,reward,new_state,done)
-
-            else :
-                action = agent.select_action(state)
-                exploration += 1
-                new_state,reward,done,info = env.step(action)
-                agent.store_experience(state,action,reward,new_state,done)
-            score += reward
-            state = new_state
-            step += 1
-            total_env_steps += 1
-
-            total_learning_steps += agent.learn()
-
-        guide_perc = f'guide used for {guide} steps out of {guide+exploration}' if jsrl else '' # {round(100*guide/(guide+exploration))} % of the time' if jsrl else ''
-        print(f'Episode {episode} score {round(score)}       {guide_perc}           {total_env_steps=} {total_learning_steps=}')
-
-        test_result = test_agent(env, agent, 10, expert, h)
-        
-
-        if h <= 0 and test_result >= -120 :
-            break
-        elif jsrl :
-            if test_result >= -120 :
-                print('         Decreasing guide steps')
-                h -= h_decrease
-
 
 class ValueNet(tf.keras.Model):
     def __init__(self, n_actions) -> None:
@@ -178,6 +82,9 @@ class DQNAgent:
             q_values = self.Q_function(input)
             action = tf.argmax(q_values[0]).numpy()
             return action
+    
+    def buffer_size(self) :
+        return len(self.states)
 
     def store_experience(self, state, action, reward, new_state, done):
         self.states.append(state)
@@ -238,19 +145,80 @@ class DQNAgent:
 
         return 1
 
+def train_agent(env,agent,n_episodes,jsrl=False) :
+    print('Preparing the expert')
+    if jsrl :
+        try :
+            expert = PPO.load('policies/PPO_CartPole-v1_200000.zip',env)
+        except :
+            print("Expert not found, training one")
+            expert = behavioral_cloning.train_expert(
+                        env, 'CartPole-v1', 200000)
+        print(f'\n Training DQN agent with JSRL for max. {n_episodes} episodes...\n')
+        h = 500
+
+    else :
+        print(f'\n Training DQN agent without JSRL for max. {n_episodes} episodes...\n')
+        expert = None
+        h = 0
+
+    max_obtained = 0 # counts the number of times we obtained the maximum score to detect convergence
+    total_env_steps = 0 # counts the number of steps we have to train
+    total_learning_steps = 0
+    for episode in range(n_episodes) :
+        done = False
+        state = env.reset()
+        score = 0
+        step = 0
+        guide = 0
+        exploration = 0
+        while not done :
+            if step < h :
+                action, _ = expert.predict(state)
+                guide += 1
+                new_state,reward,done,info = env.step(action)
+            else :
+                action = agent.select_action(state)
+                exploration += 1
+                new_state,reward,done,info = env.step(action)
+            agent.store_experience(state,action,reward,new_state,done)
+            score += reward
+            state = new_state
+            step += 1
+            total_env_steps += 1
+
+            total_learning_steps += agent.learn()
+
+        guide_perc = f'guide used for {guide} steps out of {guide+exploration}' if jsrl else '' # {round(100*guide/(guide+exploration))} % of the time' if jsrl else ''
+        print(f'Episode {episode} score {round(score)}       {guide_perc}           {total_env_steps=} {total_learning_steps=}')
+
+        test_result = test_agent(env, agent, 10, expert, h)
+        print(f'         Buffer size : {agent.buffer_size()}')
+
+        if h <= 0 :
+            if test_result == 500 :
+                max_obtained += 1
+            else :
+                max_obtained = 0
+        elif test_result > 490 :
+            print('         Decreasing guide steps')
+            h -= 5
+
+        # We assume convergence if we obtain the maximum average score 10 times in a row (equivalent to 100 trials)
+        if max_obtained >= 10 :
+            break
+
 print(' -   -   -   Using JSRL to solve MountainCar-v0 with a DQN   -   -   -')
 
 jsrl = int(input('Ready to train. Use JSRL ? (yes : 1, no : 0)\n'))
-if jsrl :
-    store_guide_data = int(input('Store guide data ? (yes : 1, no : 0)\n'))
 n_episodes = 1000
-env = gym.make('MountainCar-v0')
+env = gym.make('CartPole-v1')
 n_actions = env.action_space.n
-agent = DQNAgent(n_actions)
+agent = DQNAgent(n_actions, double=True)
 
-train_agent(env,agent,n_episodes,jsrl, store_guide_data)
+train_agent(env,agent,n_episodes,jsrl)
 
 print('\nTraining complete. Testing the agent...')
-env = gym.make('MountainCar-v0')
-n_episodes = 10
+env = gym.make('CartPole-v1')
+n_episodes = 100
 test_agent(env,agent,n_episodes)
