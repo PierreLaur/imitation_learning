@@ -1,0 +1,3 @@
+[submodule "rl_experiments"]
+	path = rl_experiments
+	url = git@github.com:PierreLaur/rl_experiments.git
