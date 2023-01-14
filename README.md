@@ -12,3 +12,4 @@ Pierre Laur [plaur@insa-toulouse.fr](mailto:plaur@insa-toulouse.fr)
 	- on CartPole-v1 to try it (it is not needed)
 	- on MountainCar-v0 (hard exploration problem)
 		* JSRL allows a DQN to solve it
+* [rl_experiments submodule](https://github.com/PierreLaur/imitation_learning) includes minimal implementations of various RL algorithms (SAC, PPO, DQN, DDPG...) along with a few other experiments 
